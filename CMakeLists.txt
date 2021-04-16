@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(Rose
+project(Etesian
         VERSION 0.0.1
         DESCRIPTION "Quintessential."
         LANGUAGES CXX C ASM)
@@ -7,27 +7,26 @@ project(Rose
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_FLAGS -L/usr/local/opt/llvm/lib)
 
-add_executable(rose
-        rose/archive/archive.cc
-        rose/rose.cc)
-set_property(TARGET rose PROPERTY CXX_STANDARD_20)
-message(STATUS "Include dir: ${CMAKE_SOURCE_DIR}/rose")
-target_include_directories(rose PUBLIC ${CMAKE_SOURCE_DIR})
-#target_link_libraries(rose PUBLIC stdc++)
+add_executable(etesian
+        src/alloc.c)
+set_property(TARGET etesian PROPERTY CXX_STANDARD_20)
+message(STATUS "Include dir: ${CMAKE_SOURCE_DIR}/etesian")
+target_include_directories(etesian PUBLIC ${CMAKE_SOURCE_DIR})
+#target_link_libraries(etesian PUBLIC stdc++)
 
 if (${CMAKE_CXX_COMPILER_ID} MATCHES "^.*Clang$")
-    target_compile_options(rose PRIVATE
+    target_compile_options(etesian PRIVATE
             $<$<CONFIG:DEBUG>:-fcolor-diagnostics>
-            --config ${CMAKE_SOURCE_DIR}/build-flags/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt)
-    add_custom_target(rose-flags-clang DEPENDS
-            ${CMAKE_SOURCE_DIR}/build-flags/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt
-            ${CMAKE_SOURCE_DIR}/build-flags/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
-    target_link_options(rose PRIVATE --config ${CMAKE_SOURCE_DIR}/build-flags/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
-    add_dependencies(rose rose-flags-clang)
+            --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt)
+    add_custom_target(etesian-flags-clang DEPENDS
+            ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt
+            ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
+    target_link_options(etesian PRIVATE --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
+    add_dependencies(etesian etesian-flags-clang)
 endif ()
-find_program(_rose_ccache ccache)
-if (_rose_ccache)
-    set_target_properties(rose
-            PROPERTIES RULE_LAUNCH_COMPILE ${_rose_ccache}
-            RULE_LAUNCH_LINK ${_rose_ccache})
+find_program(_etesian_ccache ccache)
+if (_etesian_ccache)
+    set_target_properties(etesian
+            PROPERTIES RULE_LAUNCH_COMPILE ${_etesian_ccache}
+            RULE_LAUNCH_LINK ${_etesian_ccache})
 endif ()
