@@ -17,11 +17,11 @@ target_include_directories(etesian PUBLIC ${CMAKE_SOURCE_DIR})
 if (${CMAKE_CXX_COMPILER_ID} MATCHES "^.*Clang$")
     target_compile_options(etesian PRIVATE
             $<$<CONFIG:DEBUG>:-fcolor-diagnostics>
-            --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt)
+            --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/$<$<CONFIG:DEBUG>:profile_debug>/cxx.txt)
     add_custom_target(etesian-flags-clang DEPENDS
-            ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/cxx.txt
-            ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
-    target_link_options(etesian PRIVATE --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/${CMAKE_BUILD_TYPE}/ld.txt)
+        ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/$<$<CONFIG:DEBUG>:profile_debug>/cxx.txt
+        ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/$<$<CONFIG:DEBUG>:profile_debug>/ld.txt)
+    target_link_options(etesian PRIVATE --config ${CMAKE_SOURCE_DIR}/support/${CMAKE_CXX_COMPILER_ID}/$<$<CONFIG:DEBUG>:profile_debug>/ld.txt)
     add_dependencies(etesian etesian-flags-clang)
 endif ()
 find_program(_etesian_ccache ccache)
