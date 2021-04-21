@@ -423,9 +423,11 @@ _Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block)
 }
 
 #include <assert.h>
-#include <benchmark/benchmark.h>
 
 #define NALLOC 0x1000000L
+
+#if 1
+    #include <benchmark/benchmark.h>
 
 static void BM_ETSRunthrough (benchmark::State &state)
 {
@@ -434,8 +436,8 @@ static void BM_ETSRunthrough (benchmark::State &state)
 
     int r;
     pthread_mutex_init (&__ets_chunk_tracker.ct_access, NULL);
-    ets_chunk_t *chunk = NULL;
-    r = ets_chunk_alloc (&chunk);
+    //ets_chunk_t *chunk = NULL;
+    //r = ets_chunk_alloc (&chunk);
     //printf ("[test]\tallocated chunk at %p (r = %i)\n", chunk, r);
     if (ETS_ISERR (r)) return;
     ets_heap_t *tl_heap = (ets_heap_t *)malloc (16 + 20 * sizeof (ets_lkg_t));
@@ -444,7 +446,7 @@ static void BM_ETSRunthrough (benchmark::State &state)
     for (size_t i = 0; i < tl_heap->h_nlkgs; ++i) {
         ets_lkg_init (&tl_heap->h_lkgs[i], i, tl_heap);
     }
-    r = ets_chunk_bind (chunk, tl_heap, &__ets_chunk_tracker);
+    //r = ets_chunk_bind (chunk, tl_heap, &__ets_chunk_tracker);
     //printf ("[test]\tets_chunk_bind (r = %i)\n", r);
 
     srand (0);
@@ -483,6 +485,44 @@ static void BM_MallocRunthrough (benchmark::State &state)
 BENCHMARK (BM_ETSRunthrough);
 BENCHMARK (BM_MallocRunthrough);
 BENCHMARK_MAIN ();
+#else
+
+int main (int argc, char **argv)
+{
+    void **objects = (void **)malloc (sizeof *objects * NALLOC);
+    int size = 0x80;
+
+    int r;
+    pthread_mutex_init (&__ets_chunk_tracker.ct_access, NULL);
+    ets_chunk_t *chunk = NULL;
+    r = ets_chunk_alloc (&chunk);
+    //printf ("[test]\tallocated chunk at %p (r = %i)\n", chunk, r);
+    if (ETS_ISERR (r)) return 1;
+    ets_heap_t *tl_heap = (ets_heap_t *)malloc (16 + 20 * sizeof (ets_lkg_t));
+    tl_heap->h_owning_heap = NULL;
+    tl_heap->h_nlkgs = 20;
+    for (size_t i = 0; i < tl_heap->h_nlkgs; ++i) {
+        ets_lkg_init (&tl_heap->h_lkgs[i], i, tl_heap);
+    }
+    r = ets_chunk_bind (chunk, tl_heap, &__ets_chunk_tracker);
+    //printf ("[test]\tets_chunk_bind (r = %i)\n", r);
+
+    srand (0);
+
+    for (int i = 0; i < NALLOC; i++) {
+        /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], rand () % 512);
+        //printf ("[test]\tets_heap_alloc_object[size=%i] (r = %i, object=%p)\n", size, r, objects[i]);
+    }
+    for (int i = 0; i < NALLOC; i++) {
+        /*r = */ ets_dealloc_object ((void *)objects[i]);
+        //printf ("[test]\tets_dealloc_object[object=%p] (r = %i)\n", objects[i], r);
+    }
+    free (objects);
+
+    return 0;
+}
+
+#endif
 
 /* SECTION: API */
 
@@ -1442,7 +1482,7 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
             CTXDOWN ("couldn't lift: head")
             return E_OK;
         }
-    } else if (acnt_cache <= (block->b_ocnt / 2)) {
+    } else if (acnt_cache == (block->b_ocnt / 2)) {
         if (ETS_BLFL_ROH & __atomic_load_n (&block->b_flags, __ATOMIC_SEQ_CST)) {
             CTXDOWN ("couldn't right: ROH set")
             return E_OK;
@@ -1460,6 +1500,7 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
         }
         if (!__atomic_load_n (&block->b_acnt, __ATOMIC_SEQ_CST)) {
             ets_mutex_unlock (&block->b_access);
+            __atomic_clear (&block->b_flisroh, __ATOMIC_SEQ_CST);
             CTXDOWN ("couldn't right: zeroed")
             return E_OK;
         }
@@ -1504,11 +1545,13 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
                 return r;
             } else {
                 ets_mutex_unlock (&block->b_access);
+                __atomic_clear (&block->b_flisroh, __ATOMIC_SEQ_CST);
                 CTXDOWN ("couldn't right block: spurious acnt increase")
                 return E_OK;
             }
         } else {
             ets_mutex_unlock (&block->b_access);
+            __atomic_clear (&block->b_flisroh, __ATOMIC_SEQ_CST);
             CTXDOWN ("couldn't right block: head or out-of-theatre")
             return E_OK;
         }
@@ -1550,7 +1593,7 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
             return r;
         }
         LOG ("got block %p", tmp)
-        __atomic_or_fetch (&tmp->b_flags, ETS_BLFL_HEAD, __ATOMIC_SEQ_CST);
+        __atomic_or_fetch (&tmp->b_flags, ETS_BLFL_HEAD | ETS_BLFL_IN_THEATRE, __ATOMIC_SEQ_CST);
         __atomic_and_fetch (&tmp->b_flags, ~ETS_BLFL_ROH, __ATOMIC_SEQ_CST);
         __atomic_store_n (&tmp->b_owning_tid, ets_tid (), __ATOMIC_SEQ_CST);
 
@@ -1619,7 +1662,7 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
         if (1 == is_slideable) {
             LOG ("sliding block %p", block_cache->b_next)
             __atomic_and_fetch (&block_cache->b_flags, ~ETS_BLFL_HEAD, __ATOMIC_SEQ_CST);
-            __atomic_or_fetch (&block_cache->b_next->b_flags, ETS_BLFL_HEAD, __ATOMIC_SEQ_CST);
+            __atomic_or_fetch (&block_cache->b_next->b_flags, ETS_BLFL_HEAD | ETS_BLFL_IN_THEATRE, __ATOMIC_SEQ_CST);
             __atomic_and_fetch (&block_cache->b_next->b_flags, ~ETS_BLFL_ROH, __ATOMIC_SEQ_CST);
 
             block_cache->b_owning_lkg = lkg;
@@ -1654,7 +1697,7 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
     }
     LOG ("pulled block %p", tmp)
 
-    __atomic_or_fetch (&tmp->b_flags, ETS_BLFL_HEAD, __ATOMIC_SEQ_CST);
+    __atomic_or_fetch (&tmp->b_flags, ETS_BLFL_HEAD | ETS_BLFL_IN_THEATRE, __ATOMIC_SEQ_CST);
     __atomic_and_fetch (&tmp->b_flags, ETS_BLFL_ROH, __ATOMIC_SEQ_CST);
     __atomic_store_n (&tmp->b_owning_tid, ets_tid (), __ATOMIC_SEQ_CST);
     __atomic_store_n (&tmp->b_owning_lkg, lkg, __ATOMIC_SEQ_CST);
