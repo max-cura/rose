@@ -325,7 +325,7 @@ static inline void _ETS_log (const char *s, ...)
     _ETS_logv (s, ap);
     va_end (ap);
 }
-#if 0 && (!defined(NDEBUG) || !NDEBUG)
+#if USE_LOGS && (!defined(NDEBUG) || !NDEBUG)
     #define VAR(x) x
     #define LOG(...) _ETS_log (__VA_ARGS__);
     #define CTX(...) _ETS_log_ctx (__VA_ARGS__);
@@ -372,7 +372,35 @@ size_t ets_rlup_sli (size_t lkgi)
     return (16ul << (lkgi >> 1)) + ((lkgi & 1) << ((lkgi >> 1) + 3));
 }
 
-#if 1
+//#if !USE_EXTERN_LUPSLI
+#if __x86_64__
+size_t ets_lup_sli (size_t osize)
+{
+    __asm volatile(
+        "movq %rdi, %r8\n\t"
+        "bsrq %rdi, %rax\n\t"
+        "movq %rax, %rdx\n\t"
+        "shl $1, %rax\n\t"
+        "xorq %rsi, %rsi\n\t"
+        "btrq %rdx, %rdi\n\t"
+        "setnc %sil\n\t"
+        "decq %rdx\n\t"
+        "btrq %rdx, %rdi\n\t"
+        "setc %r9b\n\t"
+        "xorq %rcx, %rcx\n\t"
+        "testq %rdi, %rdi\n\t"
+        "setnz %cl\n\t"
+        "andb %r9b, %cl\n\t"
+        "subq %rsi, %rax\n\t"
+        "addq %rcx, %rax\n\t"
+        "subq $6, %rax\n\t"
+        "movq $1, %rsi\n\t"
+        "cmpq $16, %r8\n\t"
+        "cmovleq %rsi, %rax\n\t"
+        "pop %rbp\n\t"
+        "retq\n\t");
+}
+#else
 size_t ets_lup_sli (size_t osize)
 {
     if (osize <= 16) return 1;
@@ -424,9 +452,7 @@ _Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block)
 
 #include <assert.h>
 
-#define NALLOC 0x1000000L
-
-#if 1
+#if DO_BENCHMARK
     #include <benchmark/benchmark.h>
 
 static void BM_ETSRunthrough (benchmark::State &state)
@@ -453,7 +479,7 @@ static void BM_ETSRunthrough (benchmark::State &state)
 
     for (auto _ : state) {
         for (int i = 0; i < NALLOC; i++) {
-            /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], rand () % 512);
+            /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], 1 + (rand () % 511));
             //printf ("[test]\tets_heap_alloc_object[size=%i] (r = %i, object=%p)\n", size, r, objects[i]);
         }
         for (int i = 0; i < NALLOC; i++) {
@@ -510,7 +536,7 @@ int main (int argc, char **argv)
     srand (0);
 
     for (int i = 0; i < NALLOC; i++) {
-        /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], rand () % 512);
+        /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], 1 + (rand () % 511));
         //printf ("[test]\tets_heap_alloc_object[size=%i] (r = %i, object=%p)\n", size, r, objects[i]);
     }
     for (int i = 0; i < NALLOC; i++) {
@@ -528,6 +554,8 @@ int main (int argc, char **argv)
 
 int ets_dealloc_object (void *object)
 {
+    if (!object)
+        return E_FAIL;
     ets_block_t *block = ets_get_block_for_object (object);
     return ets_block_dealloc_object (block, object);
 }
@@ -1017,7 +1045,7 @@ static int ets_chunk_bind_impl (ets_chunk_t *chunk, ets_chunk_tracker_t *tracker
         ets_block_t *block = (ets_block_t *)((uint8_t *)chunk + block_no * ETS_BLOCK_SIZE);
         const int r = ets_block_init (block);
         if (E_OK == r) {
-            chunk->c_active_mask |= 1 << (block_no - 1);
+            chunk->c_active_mask |= (1 << (block_no - 1));
             ++chunk->c_nactive;
         }
         //LOG ("block init for #%zu returned %i -> nactive=%zu, active_mask=%zx",
@@ -1149,6 +1177,10 @@ static int ets_chunk_alloc (ets_chunk_t **chunkp)
 
 static int ets_heap_alloc_object (ets_heap_t *heap, void **object, size_t osize)
 {
+    if (!osize) {
+        (*object) = NULL;
+        return E_FAIL;
+    }
     size_t lkgi = ets_lup_sli (osize);
     CTXUP ("ets_heap_alloc_object called with heap=%p, objectp=%p, osize=%zu | LKGI=%zu",
            heap, object, osize, lkgi)
@@ -1540,6 +1572,7 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
                 block->b_pfl = pfl_save;
                 block->b_gfl = gfl_save;
 
+                /* clears FLISROH */
                 const int r = ets_lkg_block_did_become_partially_empty (lkg_cache, block);
                 CTXDOWN ("ets_lkg_block_did_become_partially_empty returned %i", r)
                 return r;
