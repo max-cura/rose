@@ -9,53 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct ets_lkg;
+#include <etesian/liballoc/alloc-impl.h>
 
 static uint64_t ets_tid ();
 static int ets_on_threadinit_tid ();
 static int ets_on_threadkill_tid ();
-
-#define PRECONDITION(s)
-
-#define ETS_BLOCK_SIZE 0x4000L
-
-//! Block of memory in a chunk.
-typedef struct ets_block
-{
-    void *b_pfl, *b_gfl;
-
-    uint8_t b_flags;
-    uint8_t b_flisroh;
-    uint16_t b_ocnt;
-    uint16_t b_acnt;
-    uint16_t b_osize;
-
-    struct ets_block *b_prev, *b_next;
-    struct ets_lkg *b_owning_lkg;
-    uint64_t b_owning_tid;
-
-    pthread_mutex_t b_access;
-} ets_block_t;
-
-typedef struct ets_opaque_block
-{
-    void *b_pfl, *b_gfl;
-
-    uint8_t b_flags;
-    uint8_t b_flisroh;
-    uint16_t b_ocnt;
-    uint16_t b_acnt;
-    uint16_t b_osize;
-
-    struct ets_block *b_prev, *b_next;
-    struct ets_lkg *b_owning_lkg;
-    uint64_t b_owning_tid;
-
-    pthread_mutex_t b_gaccess;
-    uint8_t b_memory[ETS_BLOCK_SIZE - sizeof (ets_block_t)];
-} ets_opaque_block_t;
-
-int ets_dealloc_object (void *object);
 
 //! Initialize a block.
 //! Thread-Safe: 0
@@ -73,34 +31,6 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object);
 //! Format block to object size.
 //! Thread-safe: 0.
 static int ets_block_format_to_size (ets_block_t *block, size_t new_size);
-//! Get the block that owns the object at the specified memory location.
-//! Thread-safe:1
-static inline ets_block_t *ets_get_block_for_object (void *object)
-{
-    return (ets_block_t *)(void *)((uintptr_t)object & ~(ETS_BLOCK_SIZE - 1));
-}
-
-struct ets_heap;
-
-//! Linked list structure with special rules:
-//!  1. blocks to the right of head always have a significant free space
-//!  2. if the number of blocks to the right of head grows past a certain point
-//!         the blocks will be upstreamed
-//! Sized heaps only:
-//!  3. blocks to the left of head do not have significant free space
-//!  4. blocks will only ever be added to the right of the head when
-//!         blocks from the left are emptied out past a certain point
-//!         -or- when blocks from a downstream heap are evacuating
-//!  5. blocks will only ever be added to the left of the head when the head
-//!         becomes full -or- when blocks from a downstream heap are evacuating
-typedef struct ets_lkg
-{
-    struct ets_heap *l_owning_heap;
-    ets_block_t *l_active;
-    size_t l_index;
-    size_t l_nblocks;
-    pthread_mutex_t l_access;
-} ets_lkg_t;
 
 static int ets_lkg_init (ets_lkg_t *lkg, size_t lkgi, struct ets_heap *heap);
 //! Allocate object form linkage.
@@ -120,64 +50,17 @@ static int ets_lkg_block_did_become_partially_empty (ets_lkg_t *lkg, ets_block_t
 //! Destroy heap
 //! Thread-safe: OWNING
 static int ets_lkg_evacuate_and_clean (ets_lkg_t *lkg);
-
-//! Either local or regional; global is hardcoded as a NULL value in
-//! `h_owning_heap`.
-//! 0TE: IF ADDING OR SUBTRACTING MEMBERS, REMEMBER TO MODIFY ets_get_heap_for_lkg
-typedef struct ets_heap
-{
-    struct ets_heap *h_owning_heap;
-    size_t h_nlkgs;
-    ets_lkg_t h_lkgs[];
-} ets_heap_t;
-
-struct ets_arena;
-
 static int ets_heap_alloc_object (ets_heap_t *heap, void **object, size_t size);
 static int ets_heap_req_block_from_top (ets_heap_t *heap, size_t lkgi, ets_block_t **blockp);
 static int ets_heap_req_block_from_heap (ets_heap_t *heap, size_t lkgi, ets_block_t **blockp);
 static int ets_heap_req_block_from_ulkg (ets_lkg_t *lkg, size_t osize, ets_block_t **blockp);
 static int ets_heap_req_block_from_slkg (ets_lkg_t *lkg, ets_block_t **block);
 static int ets_heap_catch (ets_heap_t *heap, ets_block_t *block, size_t lkgi);
-#if 0
-static int ets_heap_receive_evacuating_block_from_lkg (ets_heap_t *heap, ets_block_t *block, ets_lkg_t *ctx);
-static int ets_heap_receive_evacuating_block_from_heap (ets_heap_t *heap, ets_block_t *block, ets_heap_t *ctx);
-#endif
 static int ets_heap_receive_applicant (ets_heap_t *heap, ets_block_t *block);
 static int ets_heap_evacuate_and_clean (ets_heap_t *heap);
-static inline ets_heap_t *ets_get_heap_for_lkg (ets_lkg_t *lkg)
-{
-    return (ets_heap_t *)((uint8_t *)(lkg - lkg->l_index) - sizeof (ets_heap_t *) - sizeof (size_t));
-}
-
-//! Allocation pressure hints (currently unused)
-typedef enum ets_chunktype {
-    ETS_CHUNKTYPE_NORMAL = 0x00,
-    ETS_CHUNKTYPE_HOT = 0x01,
-    ETS_CHUNKTYPE_COLD = 0x02,
-} ets_chunktype_t;
-#define ETS_CHUNKTYPE_MASK 0x03
-
-struct ets_chunk_tracker;
-
-#define ETS_CHUNK_SIZE 0x100000L
-//! Large memory chunk
-typedef struct ets_chunk
-{
-    struct ets_chunk *c_next, *c_prev;
-    struct ets_chunk_tracker *c_tracker;
-    int64_t c_flags;
-    size_t c_nactive;
-    uint64_t c_active_mask;
-} ets_chunk_t;
-typedef struct ets_chunk_tracker
-{
-    ets_chunk_t *ct_first;
-    pthread_mutex_t ct_access;
-} ets_chunk_tracker_t;
 
 static ets_chunk_tracker_t __ets_chunk_tracker = {
-    .ct_first = NULL,
+    .ct_first = nullptr,
     .ct_access = PTHREAD_MUTEX_INITIALIZER,
 };
 
@@ -200,14 +83,6 @@ static int ets_chunk_reserve_and_bind (ets_chunk_t *chunk, ets_block_t **lift, e
 //! Free all remaining blocks in a chunk, and then the chunk itself.
 //! Thread-safe: OWNING.
 static int ets_chunk_free (ets_chunk_t *chunk);
-static inline ets_chunk_t *ets_get_chunk_for_block (ets_block_t *block)
-{
-    return (ets_chunk_t *)(void *)((uintptr_t)block & ~(ETS_CHUNK_SIZE - 1));
-}
-static inline size_t ets_get_block_no (ets_block_t *block)
-{
-    return (((uintptr_t)block & ~(ETS_CHUNK_SIZE - 1)) / ETS_BLOCK_SIZE) - 1;
-}
 
 #define LIKELY(x) __builtin_expect (!!(x), 1)
 #define UNLIKELY(x) __builtin_expect (!!(x), 0)
@@ -325,7 +200,7 @@ static inline void _ETS_log (const char *s, ...)
     _ETS_logv (s, ap);
     va_end (ap);
 }
-#if USE_LOGS && (!defined(NDEBUG) || !NDEBUG)
+#if ETS_ALLOC_USE_LOGS && (!defined(NDEBUG) || !NDEBUG)
     #define VAR(x) x
     #define LOG(...) _ETS_log (__VA_ARGS__);
     #define CTX(...) _ETS_log_ctx (__VA_ARGS__);
@@ -355,14 +230,14 @@ extern "C"
 {
     size_t ets_rlup_sli (size_t lkgi);
     size_t ets_lup_sli (size_t osize);
-    _Bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg);
-    _Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block);
+    bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg);
+    bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block);
 }
 #else
 extern size_t ets_rlup_sli (size_t lkgi);
 extern size_t ets_lup_sli (size_t osize);
-extern _Bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg);
-extern _Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block);
+extern bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg);
+extern bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block);
 #endif
 /* SECTION: TESTING */
 
@@ -399,6 +274,7 @@ size_t ets_lup_sli (size_t osize)
         "cmovleq %rsi, %rax\n\t"
         "pop %rbp\n\t"
         "retq\n\t");
+    __builtin_unreachable ();
 }
 #else
 size_t ets_lup_sli (size_t osize)
@@ -420,10 +296,10 @@ size_t ets_lup_sli (size_t osize)
 #define ETS_LKG_LIFT_BOUNDARY_ROOT_SLKG 32
 #define ETS_LKG_LIFT_BOUNDARY_ROOT_ULKG 64
 
-_Bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg)
+bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg)
 {
     PRECONDITION ("<LL>");
-    if (heap->h_owning_heap == NULL) {
+    if (heap->h_owning_heap == nullptr) {
         return lkg->l_index == 0
                    ? lkg->l_nblocks < ETS_LKG_LIFT_BOUNDARY_ROOT_ULKG
                    : lkg->l_nblocks < ETS_LKG_LIFT_BOUNDARY_ROOT_SLKG;
@@ -433,14 +309,14 @@ _Bool ets_should_lkg_recv_block (ets_heap_t *heap, ets_lkg_t *lkg)
                : lkg->l_nblocks < ETS_LKG_LIFT_BOUNDARY_NORMAL_SLKG;
 }
 
-_Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block)
+bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block)
 {
     PRECONDITION ("<LL>");
     if (lkg->l_index == 0) {
         fprintf (stderr, "lift event occurred in ulkg.");
         return 0;
     }
-    if (lkg->l_owning_heap->h_owning_heap == NULL) {
+    if (lkg->l_owning_heap->h_owning_heap == nullptr) {
         return lkg->l_index == 0
                    ? lkg->l_nblocks >= ETS_LKG_LIFT_BOUNDARY_ROOT_ULKG
                    : lkg->l_nblocks >= ETS_LKG_LIFT_BOUNDARY_ROOT_SLKG;
@@ -448,116 +324,6 @@ _Bool ets_should_lkg_lift_block (ets_lkg_t *lkg, ets_block_t *block)
     return lkg->l_index == 0
                ? lkg->l_nblocks >= ETS_LKG_LIFT_BOUNDARY_NORMAL_ULKG
                : lkg->l_nblocks >= ETS_LKG_LIFT_BOUNDARY_NORMAL_SLKG;
-}
-
-#include <assert.h>
-
-#if DO_BENCHMARK
-    #include <benchmark/benchmark.h>
-
-static void BM_ETSRunthrough (benchmark::State &state)
-{
-    void **objects = (void **)malloc (sizeof *objects * NALLOC);
-    int size = 0x80;
-
-    int r;
-    pthread_mutex_init (&__ets_chunk_tracker.ct_access, NULL);
-    //ets_chunk_t *chunk = NULL;
-    //r = ets_chunk_alloc (&chunk);
-    //printf ("[test]\tallocated chunk at %p (r = %i)\n", chunk, r);
-    if (ETS_ISERR (r)) return;
-    ets_heap_t *tl_heap = (ets_heap_t *)malloc (16 + 20 * sizeof (ets_lkg_t));
-    tl_heap->h_owning_heap = NULL;
-    tl_heap->h_nlkgs = 20;
-    for (size_t i = 0; i < tl_heap->h_nlkgs; ++i) {
-        ets_lkg_init (&tl_heap->h_lkgs[i], i, tl_heap);
-    }
-    //r = ets_chunk_bind (chunk, tl_heap, &__ets_chunk_tracker);
-    //printf ("[test]\tets_chunk_bind (r = %i)\n", r);
-
-    srand (0);
-
-    for (auto _ : state) {
-        for (int i = 0; i < NALLOC; i++) {
-            /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], 1 + (rand () % 511));
-            //printf ("[test]\tets_heap_alloc_object[size=%i] (r = %i, object=%p)\n", size, r, objects[i]);
-        }
-        for (int i = 0; i < NALLOC; i++) {
-            /*r = */ ets_dealloc_object ((void *)objects[i]);
-            //printf ("[test]\tets_dealloc_object[object=%p] (r = %i)\n", objects[i], r);
-        }
-    }
-    free (objects);
-}
-
-static void BM_MallocRunthrough (benchmark::State &state)
-{
-    void **objects = (void **)malloc (sizeof *objects * NALLOC);
-    int size = 0x80;
-
-    srand (0);
-
-    for (auto _ : state) {
-        for (int i = 0; i < NALLOC; i++) {
-            objects[i] = malloc (rand () % 512);
-        }
-        for (int i = 0; i < NALLOC; i++) {
-            free ((void *)objects[i]);
-        }
-    }
-    free (objects);
-}
-
-BENCHMARK (BM_ETSRunthrough);
-BENCHMARK (BM_MallocRunthrough);
-BENCHMARK_MAIN ();
-#else
-
-int main (int argc, char **argv)
-{
-    void **objects = (void **)malloc (sizeof *objects * NALLOC);
-    int size = 0x80;
-
-    int r;
-    pthread_mutex_init (&__ets_chunk_tracker.ct_access, NULL);
-    ets_chunk_t *chunk = NULL;
-    r = ets_chunk_alloc (&chunk);
-    //printf ("[test]\tallocated chunk at %p (r = %i)\n", chunk, r);
-    if (ETS_ISERR (r)) return 1;
-    ets_heap_t *tl_heap = (ets_heap_t *)malloc (16 + 20 * sizeof (ets_lkg_t));
-    tl_heap->h_owning_heap = NULL;
-    tl_heap->h_nlkgs = 20;
-    for (size_t i = 0; i < tl_heap->h_nlkgs; ++i) {
-        ets_lkg_init (&tl_heap->h_lkgs[i], i, tl_heap);
-    }
-    r = ets_chunk_bind (chunk, tl_heap, &__ets_chunk_tracker);
-    //printf ("[test]\tets_chunk_bind (r = %i)\n", r);
-
-    srand (0);
-
-    for (int i = 0; i < NALLOC; i++) {
-        /*r = */ ets_heap_alloc_object (tl_heap, (void **)&objects[i], 1 + (rand () % 511));
-        //printf ("[test]\tets_heap_alloc_object[size=%i] (r = %i, object=%p)\n", size, r, objects[i]);
-    }
-    for (int i = 0; i < NALLOC; i++) {
-        /*r = */ ets_dealloc_object ((void *)objects[i]);
-        //printf ("[test]\tets_dealloc_object[object=%p] (r = %i)\n", objects[i], r);
-    }
-    free (objects);
-
-    return 0;
-}
-
-#endif
-
-/* SECTION: API */
-
-int ets_dealloc_object (void *object)
-{
-    if (!object)
-        return E_FAIL;
-    ets_block_t *block = ets_get_block_for_object (object);
-    return ets_block_dealloc_object (block, object);
 }
 
 /* SECTION: PAGE ALLOCATION */
@@ -568,7 +334,6 @@ int ets_dealloc_object (void *object)
     #include <mach/mach.h>
     #include <mach/vm_types.h>
     #include <mach/mach_vm.h>
-//#include </Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/mach/vm_types.h>
 #endif
 #include <sys/mman.h>
 #if ETS_FEATURE_CHUNKS_USE_MEMALIGN
@@ -592,7 +357,7 @@ static int ets_pages_alloc (void **memory, size_t size)
     }
     (*memory) = (void *)vm_addr;
 #else
-    (*memory) = mmap (NULL, size, PROT_READ | PROT_WRITE,
+    (*memory) = mmap (nullptr, size, PROT_READ | PROT_WRITE,
                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (MAP_FAILED == *memory) {
         CTX ("ets_pages_alloc: mmap failed for size=%p with error code %i (%s)",
@@ -607,7 +372,7 @@ static int ets_pages_alloc (void **memory, size_t size)
 static int ets_pages_alloc_aligned (void **memory, size_t size, size_t align)
 {
 #if ETS_FEATURE_CHUNKS_USE_MACH_MAP && defined __APPLE__
-    mach_vm_address_t vm_addr = NULL;
+    mach_vm_address_t vm_addr = nullptr;
     kern_return_t kr = 0;
     kr = mach_vm_map (mach_task_self (),
                       &vm_addr,
@@ -632,7 +397,7 @@ static int ets_pages_alloc_aligned (void **memory, size_t size, size_t align)
 #else
     const size_t mapped_size = (align << 1) - 0x1000;
     /* afaict, MAP_ANONYMOUS is more standard than MAP_ANON */
-    void *swath = mmap (NULL, mapped_size, PROT_READ | PROT_WRITE,
+    void *swath = mmap (nullptr, mapped_size, PROT_READ | PROT_WRITE,
                         MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (swath == MAP_FAILED) {
         CTX ("ets_pages_alloc_aligned: mmap failed for size=%p, align=%p with error code %i (%s)",
@@ -685,9 +450,9 @@ struct _ETS_page_vect
     size_t pv_nobjs;
     void *pv_pages;
 };
-#define _ETS_PAGE_VECT_INIT(x)                                         \
-    {                                                                  \
-        .pv_size = 0, .pv_osize = (x), .pv_nobjs = 0, .pv_pages = NULL \
+#define _ETS_PAGE_VECT_INIT(x)                                            \
+    {                                                                     \
+        .pv_size = 0, .pv_osize = (x), .pv_nobjs = 0, .pv_pages = nullptr \
     }
 
 static size_t _ets_page_vect_size (struct _ETS_page_vect *pv)
@@ -704,7 +469,7 @@ static int _ets_page_vect_push (struct _ETS_page_vect *pv, void *obj)
             new_map_size = pv->pv_size << 1;
         }
         void *old_pages = pv->pv_pages;
-        pv->pv_pages = mmap (NULL, new_map_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED,
+        pv->pv_pages = mmap (nullptr, new_map_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED,
                              -1, 0);
         if (MAP_FAILED == pv->pv_pages) {
             fprintf (stderr, "could not grow page_vect: map failed\n");
@@ -753,7 +518,7 @@ static uint64_t ets_tid_next_monotonic ()
 #if ETS_TID_TRY_RECYCLE
 static void __ETS_init_recyaccess (void)
 {
-    pthread_mutex_init (&__ETS_tid_recyaccess, NULL);
+    pthread_mutex_init (&__ETS_tid_recyaccess, nullptr);
 }
 #endif
 
@@ -826,13 +591,13 @@ static int ets_lkg_block_did_become_empty (ets_lkg_t *lkg, ets_block_t *block)
     }
 
     void *heap = ets_get_heap_for_lkg (lkg);
-    if (block->b_prev != NULL) {
+    if (block->b_prev != nullptr) {
         block->b_prev->b_next = block->b_next;
-        //block->b_prev = NULL;
+        //block->b_prev = nullptr;
     }
-    if (block->b_next != NULL) {
+    if (block->b_next != nullptr) {
         block->b_next->b_prev = block->b_prev;
-        //block->b_next = NULL
+        //block->b_next = nullptr
     }
     /* do not have to worry about l_active */
     __atomic_store_n (&block->b_owning_tid, ETS_TID_NULL, __ATOMIC_SEQ_CST);
@@ -861,7 +626,7 @@ static int ets_heap_receive_applicant (ets_heap_t *heap, ets_block_t *block)
         if (block->b_prev)
             block->b_prev->b_next = block;
     } else
-        block->b_prev = NULL;
+        block->b_prev = nullptr;
     __atomic_store_n (&block->b_owning_lkg, recv_lkg, __ATOMIC_SEQ_CST);
     __atomic_store_n (&block->b_owning_tid, ETS_TID_NULL, __ATOMIC_SEQ_CST);
     __atomic_store_n (&recv_lkg->l_active, block, __ATOMIC_SEQ_CST);
@@ -882,7 +647,7 @@ static int ets_lkg_receive_block (ets_lkg_t *recv_lkg, ets_block_t *block)
         if (block->b_prev)
             block->b_prev->b_next = block;
     } else
-        block->b_prev = NULL;
+        block->b_prev = nullptr;
     __atomic_store_n (&block->b_owning_lkg, recv_lkg, __ATOMIC_SEQ_CST);
     __atomic_store_n (&block->b_owning_tid, ETS_TID_NULL, __ATOMIC_SEQ_CST);
     __atomic_store_n (&recv_lkg->l_active, block, __ATOMIC_SEQ_CST);
@@ -897,7 +662,7 @@ static int ets_heap_catch (ets_heap_t *heap, ets_block_t *block, size_t lkgi)
     PRECONDITION ("<GL> |BADLINK");
     CTXUP ("ets_heap_catch called with heap=%p, block=%p, lkgi=%zu", heap, block, lkgi);
 
-    if (heap == NULL) {
+    if (heap == nullptr) {
         /* toplvl */
         ets_block_free (block);
         CTXDOWN ("toplvl free'd block %p", block);
@@ -932,7 +697,7 @@ static int ets_lkg_evacuate_and_clean (ets_lkg_t *lkg)
     CTXUP ("EVACUATING LINKAGE %p", lkg);
     ets_mutex_lock (&lkg->l_access);
     ets_heap_t *heap = lkg->l_owning_heap;
-    ets_block_t *head = __atomic_exchange_n (&lkg->l_active, NULL, __ATOMIC_SEQ_CST);
+    ets_block_t *head = __atomic_exchange_n (&lkg->l_active, nullptr, __ATOMIC_SEQ_CST);
 
     VAR (int evac_block_count = 0;)
 
@@ -981,9 +746,9 @@ static int ets_lkg_block_did_become_partially_empty (ets_lkg_t *lkg, ets_block_t
 
     /* does 0T go above linkage level under any circumstances */
 
-    if (block->b_prev != NULL)
+    if (block->b_prev != nullptr)
         block->b_prev->b_next = block->b_next;
-    if (block->b_next != NULL)
+    if (block->b_next != nullptr)
         block->b_next->b_prev = block->b_prev;
 
     ets_block_t *head_cache = __atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST);
@@ -1030,7 +795,7 @@ static int ets_chunk_bind_impl (ets_chunk_t *chunk, ets_chunk_tracker_t *tracker
     CTXUP ("ets_chunk_bind_impl called with chunk = %p, tracker = %p");
     chunk->c_tracker = tracker;
     ets_mutex_lock (&tracker->ct_access);
-    chunk->c_prev = NULL;
+    chunk->c_prev = nullptr;
     chunk->c_next = __atomic_load_n (&tracker->ct_first, __ATOMIC_SEQ_CST);
     if (chunk->c_next)
         chunk->c_next->c_prev = chunk;
@@ -1092,7 +857,7 @@ static int ets_chunk_reserve_and_bind (ets_chunk_t *chunk, ets_block_t **lift, e
     }
 
     VAR (int n_bound = 0;)
-    _Bool has_lifted = 0;
+    bool has_lifted = 0;
     for (size_t block_no = 1; block_no < 64; ++block_no) {
         uint64_t filter = (1 << (block_no - 1));
         if (chunk->c_active_mask & filter) {
@@ -1137,7 +902,7 @@ static int ets_chunk_free (ets_chunk_t *chunk)
     if (chunk == __atomic_load_n (&tracker->ct_first, __ATOMIC_SEQ_CST)) {
         __atomic_store_n (&tracker->ct_first, chunk->c_next, __ATOMIC_SEQ_CST);
         if (chunk->c_next)
-            chunk->c_next->c_prev = NULL;
+            chunk->c_next->c_prev = nullptr;
     } else {
         chunk->c_prev->c_next = chunk->c_next;
         if (chunk->c_next)
@@ -1157,15 +922,15 @@ static int ets_chunk_free (ets_chunk_t *chunk)
 static int ets_chunk_alloc (ets_chunk_t **chunkp)
 {
     CTXUP ("ets_chunk_alloc called with chunkp=%p", chunkp)
-    (*chunkp) = NULL;
+    (*chunkp) = nullptr;
 
     const int r = ets_pages_alloc_aligned ((void **)chunkp, ETS_CHUNK_SIZE, ETS_CHUNK_SIZE);
     if (E_OK != r) {
         CTXDOWN ("ets_pages_alloc_aligned failed with error code %i", r)
         return r;
     }
-    (*chunkp)->c_next = NULL;
-    (*chunkp)->c_tracker = NULL;
+    (*chunkp)->c_next = nullptr;
+    (*chunkp)->c_tracker = nullptr;
     (*chunkp)->c_active_mask = 0;
     (*chunkp)->c_nactive = 0;
 
@@ -1178,7 +943,7 @@ static int ets_chunk_alloc (ets_chunk_t **chunkp)
 static int ets_heap_alloc_object (ets_heap_t *heap, void **object, size_t osize)
 {
     if (!osize) {
-        (*object) = NULL;
+        (*object) = nullptr;
         return E_FAIL;
     }
     size_t lkgi = ets_lup_sli (osize);
@@ -1264,9 +1029,9 @@ static int ets_heap_req_block_from_ulkg (ets_lkg_t *lkg, size_t osize, ets_block
     ets_block_t *block_cache = __atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST);
 
 #if 0
-    ets_block_t *best_match{ NULL };
+    ets_block_t *best_match{ nullptr };
     size_t highest_priority{ 0 };
-    while (block_cache != NULL) {
+    while (block_cache != nullptr) {
         const size_t priority = __atomic_load_n (&ets_get_chunk_for_block (block_cache)->c_priority);
         if (priority >= highest_priority) {
             best_match = block_cache;
@@ -1304,7 +1069,7 @@ static int ets_heap_req_block_from_slkg (ets_lkg_t *lkg, ets_block_t **blockp)
     ets_block_t *block_cache = __atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST);
 
 #if 0
-    ets_block_t *best_match{ NULL };
+    ets_block_t *best_match{ nullptr };
     size_t highest_priority{ 0 };
     if (lkg->l_nblocks == 1) {
         ets_mutex_lock (&block_cache->b_access);
@@ -1316,13 +1081,13 @@ static int ets_heap_req_block_from_slkg (ets_lkg_t *lkg, ets_block_t **blockp)
         }
     }
 #endif
-    _Bool found_match = 0;
-    while (block_cache != NULL) {
+    bool found_match = 0;
+    while (block_cache != nullptr) {
         ets_mutex_lock (&block_cache->b_access);
-        if (NULL == __atomic_load_n (&block_cache->b_gfl, __ATOMIC_SEQ_CST)
-            && NULL == __atomic_load_n (&block_cache->b_pfl, __ATOMIC_SEQ_CST)) {
+        if (nullptr == __atomic_load_n (&block_cache->b_gfl, __ATOMIC_SEQ_CST)
+            && nullptr == __atomic_load_n (&block_cache->b_pfl, __ATOMIC_SEQ_CST)) {
             if (__atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST) == block_cache) {
-                if (block_cache->b_next != NULL || block_cache->b_prev == NULL)
+                if (block_cache->b_next != nullptr || block_cache->b_prev == NULL)
                     __atomic_store_n (&lkg->l_active, block_cache->b_next, __ATOMIC_SEQ_CST);
                 else
                     __atomic_store_n (&lkg->l_active, block_cache->b_prev, __ATOMIC_SEQ_CST);
@@ -1333,8 +1098,8 @@ static int ets_heap_req_block_from_slkg (ets_lkg_t *lkg, ets_block_t **blockp)
                 block_cache->b_prev->b_next = block_cache->b_next;
             ets_block_t *tmp = block_cache->b_next;
             /* again, cauterize is optional, but makes things easier */
-            block_cache->b_next = NULL;
-            block_cache->b_prev = NULL;
+            block_cache->b_next = nullptr;
+            block_cache->b_prev = nullptr;
             ets_mutex_unlock (&block_cache->b_access);
             block_cache = tmp;
         } else {
@@ -1357,8 +1122,8 @@ static int ets_heap_req_block_from_slkg (ets_lkg_t *lkg, ets_block_t **blockp)
     ets_mutex_lock (&block_cache->b_access);
     ets_block_t *curr_head = __atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST);
     if (curr_head == block_cache) {
-        /* if both b_next AND b_prev are NULL, it'll use b_next which is NULL */
-        if (curr_head->b_next != NULL || curr_head->b_prev == NULL)
+        /* if both b_next AND b_prev are nullptr, it'll use b_next which is NULL */
+        if (curr_head->b_next != nullptr || curr_head->b_prev == NULL)
             __atomic_store_n (&lkg->l_active, curr_head->b_next, __ATOMIC_SEQ_CST);
         else
             __atomic_store_n (&lkg->l_active, curr_head->b_prev, __ATOMIC_SEQ_CST);
@@ -1398,7 +1163,7 @@ static int ets_block_init (ets_block_t *block)
     /* TODO: write these out properly */
     memset (block, 0, &opaque_block->b_memory[0] - (uint8_t *)block);
 
-    pthread_mutex_init (&block->b_access, NULL);
+    pthread_mutex_init (&block->b_access, nullptr);
 
     return E_OK;
 }
@@ -1415,7 +1180,7 @@ static int ets_block_format_to_size (ets_block_t *block, size_t osize)
     PRECONDITION ("block must be locked");
     uint8_t *memory = ((ets_opaque_block_t *)block)->b_memory;
     block->b_pfl = memory;
-    __atomic_store_n (&block->b_gfl, NULL, __ATOMIC_SEQ_CST);
+    __atomic_store_n (&block->b_gfl, nullptr, __ATOMIC_SEQ_CST);
     block->b_osize = osize;
     block->b_ocnt = (ETS_BLOCK_SIZE - sizeof (ets_block_t)) / osize;
     __atomic_store_n (&block->b_flags, 0, __ATOMIC_SEQ_CST);
@@ -1429,7 +1194,7 @@ static int ets_block_format_to_size (ets_block_t *block, size_t osize)
         *(void **)(memory + i * osize) = &memory[(i + 1) * osize];
         //printf ("block_fmt: %p -> %p\n", &memory[i * osize], *(void **)(memory + i * osize));
     }
-    *(void **)(memory + (i - 1) * osize) = NULL;
+    *(void **)(memory + (i - 1) * osize) = nullptr;
     //printf ("rewrote %p -> %p\n", &memory[i * osize - osize], *(void **)(memory + i * osize - osize));
 
     return E_OK;
@@ -1451,16 +1216,16 @@ static int ets_block_alloc_object (ets_block_t *block, void **object)
          " | pfl=%p | acnt=%zu/%zu",
          block, object, block->b_pfl, __atomic_load_n (&block->b_acnt, __ATOMIC_SEQ_CST),
          block->b_ocnt)
-    if (block->b_pfl != NULL) {
+    if (block->b_pfl != nullptr) {
         return ets_block_alloc_object_impl (block, object);
     } else {
         ets_mutex_lock (&block->b_access);
         /* not actually atomic, just needed an XCHG instruction */
-        block->b_pfl = __atomic_exchange_n (&block->b_gfl, NULL, __ATOMIC_SEQ_CST);
+        block->b_pfl = __atomic_exchange_n (&block->b_gfl, nullptr, __ATOMIC_SEQ_CST);
         ets_mutex_unlock (&block->b_access);
         CTX ("swapped null pfl for gfl; now pfl=%p", block->b_pfl)
 
-        if (LIKELY (block->b_pfl != NULL)) {
+        if (LIKELY (block->b_pfl != nullptr)) {
             return ets_block_alloc_object_impl (block, object);
         }
         return E_BL_EMPTY;
@@ -1491,8 +1256,8 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
             if (0 == __atomic_load_n (&block->b_acnt, __ATOMIC_SEQ_CST)) {
                 void *pfl_save = block->b_pfl,
                      *gfl_save = block->b_gfl;
-                block->b_pfl = NULL;
-                block->b_gfl = NULL;
+                block->b_pfl = nullptr;
+                block->b_gfl = nullptr;
                 ets_mutex_unlock (&block->b_access);
 
                 ets_lkg_t *const lkg_cache = __atomic_load_n (&block->b_owning_lkg, __ATOMIC_SEQ_CST);
@@ -1547,8 +1312,8 @@ static int ets_block_dealloc_object (ets_block_t *block, void *object)
             if ((block->b_ocnt / 2) >= __atomic_load_n (&block->b_acnt, __ATOMIC_SEQ_CST)) {
                 void *pfl_save = block->b_pfl;
                 void *gfl_save = block->b_gfl;
-                block->b_pfl = NULL;
-                block->b_gfl = NULL;
+                block->b_pfl = nullptr;
+                block->b_gfl = nullptr;
                 ets_mutex_unlock (&block->b_access);
 
                 /* issue: if a head transfer op is in progress
@@ -1601,8 +1366,8 @@ static int ets_lkg_init (ets_lkg_t *lkg, size_t lkgi, ets_heap_t *heap)
     lkg->l_index = lkgi;
     lkg->l_owning_heap = heap;
     lkg->l_nblocks = 0;
-    lkg->l_active = NULL;
-    pthread_mutex_init (&lkg->l_access, NULL);
+    lkg->l_active = nullptr;
+    pthread_mutex_init (&lkg->l_access, nullptr);
 
     return E_OK;
 }
@@ -1615,7 +1380,7 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
     int r;
 
     ets_block_t *block_cache = __atomic_load_n (&lkg->l_active, __ATOMIC_SEQ_CST);
-    if (UNLIKELY (block_cache == NULL)) {
+    if (UNLIKELY (block_cache == nullptr)) {
         LOG ("empty lkg, pulling from upstream...")
         ets_mutex_lock (&lkg->l_access);
 
@@ -1631,8 +1396,8 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
         __atomic_store_n (&tmp->b_owning_tid, ets_tid (), __ATOMIC_SEQ_CST);
 
         __atomic_store_n (&tmp->b_owning_lkg, lkg, __ATOMIC_SEQ_CST);
-        tmp->b_next = NULL;
-        tmp->b_prev = NULL;
+        tmp->b_next = nullptr;
+        tmp->b_prev = nullptr;
         __atomic_store_n (&lkg->l_active, tmp, __ATOMIC_SEQ_CST);
 
         ets_mutex_unlock (&tmp->b_access);
@@ -1657,14 +1422,14 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
     ets_mutex_lock (&lkg->l_access);
     ets_mutex_lock (&block_cache->b_access);
 
-    if (block_cache->b_next != NULL) {
+    if (block_cache->b_next != nullptr) {
         LOG ("attempting slide")
-        _Bool is_slideable = 1;
+        bool is_slideable = 1;
         for (;;) {
             ets_mutex_lock (&block_cache->b_next->b_access);
 
-            if (NULL == block_cache->b_next->b_gfl
-                && NULL == block_cache->b_next->b_pfl
+            if (nullptr == block_cache->b_next->b_gfl
+                && nullptr == block_cache->b_next->b_pfl
             /* double null free lists will ONLY occur naturally in
                      * head or left-of-head blocks */
 #if 0
@@ -1674,15 +1439,15 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
             ) {
                 ets_block_t *liftee = block_cache->b_next;
                 block_cache->b_next = liftee->b_next;
-                if (liftee->b_next != NULL)
+                if (liftee->b_next != nullptr)
                     liftee->b_next->b_prev = block_cache;
                 /* cauterize - optional, but makes things easier*/
-                liftee->b_next = NULL;
-                liftee->b_prev = NULL;
+                liftee->b_next = nullptr;
+                liftee->b_prev = nullptr;
 
                 ets_mutex_unlock (&liftee->b_access);
                 LOG ("cauterizd block %p, moving on", liftee)
-                if (block_cache->b_next == NULL) {
+                if (block_cache->b_next == nullptr) {
                     is_slideable = 0;
                     break;
                 }
@@ -1738,7 +1503,7 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
     __atomic_and_fetch (&block_cache->b_flags, ~ETS_BLFL_HEAD, __ATOMIC_SEQ_CST);
     tmp->b_prev = block_cache;
     tmp->b_next = block_cache->b_next;
-    if (tmp->b_next != NULL)
+    if (tmp->b_next != nullptr)
         tmp->b_next->b_prev = tmp;
     __atomic_store_n (&lkg->l_active, tmp, __ATOMIC_SEQ_CST);
     ets_mutex_unlock (&tmp->b_access);
@@ -1755,4 +1520,105 @@ static int ets_lkg_alloc_object (ets_lkg_t *lkg, ets_heap_t *heap, void **object
     CTXDOWN ("ets_block_alloc_object returned %i; object=%p", r, *object)
     return r;
 #endif
+}
+
+
+/* SECTION: API */
+
+#include <etesian/liballoc/thread_support.h>
+#define ETS_HEAP_SIZE (24 + 20 * sizeof (ets_lkg_t))
+
+static thread_local uint8_t _ETS_heap_backing[ETS_HEAP_SIZE];
+static auto _ETS_heap_destructor_lambda = scoped_lambda<void (ets_heap_t *&)> (
+    [] (ets_heap_t *&heap) -> void {
+        ets_heap_evacuate_and_clean (heap);
+    });
+namespace ets::alloc::heap_detail {
+    thread_local ets::alloc::thread_support::LocalWrapper<ets_heap_t *, false>
+        _ETS_local_heap (scoped_lambda<ets_heap_t *()> ([] () -> ets_heap_t * {
+                             ets_heap_t *heap = (ets_heap_t *)_ETS_heap_backing;
+                             heap->h_owning_heap = nullptr;
+                             heap->h_nlkgs = 20;
+                             for (size_t i = 0; i < heap->h_nlkgs; ++i) {
+                                 ets_lkg_init (&heap->h_lkgs[i], i, heap);
+                             }
+                             return heap;
+                         }),
+                         _ETS_heap_destructor_lambda);
+}
+
+static void *_ETS_last_rheap_block{ nullptr };
+static ets::alloc::thread_support::PThreadMutex _ETS_rheaps_access;
+static void *_ETS_rheaps_freelist{ nullptr };
+
+namespace ets::alloc::heap_detail {
+    int create_regional_heap (void **rheapp)
+    {
+        struct _OpaqueHeap
+        {
+            uint8_t _0[ETS_HEAP_SIZE];
+        };
+        _ETS_rheaps_access.lock ();
+        if (!_ETS_rheaps_freelist) {
+            void *new_rheap_block;
+            ets_pages_alloc (&new_rheap_block, 0x4000);
+            *(void **)new_rheap_block = _ETS_last_rheap_block;
+            _OpaqueHeap *ophps = (_OpaqueHeap *)((void **)new_rheap_block + 1);
+            const size_t cnt = (0x4000 / sizeof (_OpaqueHeap)) - 1;
+            size_t i;
+            for (i = 0; i < cnt - 1; ++i) {
+                *((void **)&ophps[i]) = ophps + i + 1;
+            }
+            *((void **)&ophps[i]) = nullptr;
+            _ETS_last_rheap_block = new_rheap_block;
+        }
+
+        (*rheapp) = _ETS_rheaps_freelist;
+        _ETS_rheaps_freelist = *((void **)_ETS_rheaps_freelist);
+        _ETS_rheaps_access.unlock ();
+
+        return E_OK;
+    }
+
+    int free_regional_heap (void *rheap)
+    {
+        memset (rheap, 0, ETS_HEAP_SIZE);
+        _ETS_rheaps_access.lock ();
+        *(void **)rheap = _ETS_rheaps_freelist;
+        _ETS_rheaps_freelist = rheap;
+        _ETS_rheaps_access.unlock ();
+        return E_OK;
+    }
+
+    int free_rheaps ()
+    {
+        _ETS_rheaps_access.lock ();
+        void *iter = _ETS_last_rheap_block;
+        while (iter) {
+            void *next_iter = *(void **)iter;
+            ets_pages_free (iter, 0x4000);
+            iter = next_iter;
+        }
+        _ETS_rheaps_access.unlock ();
+        return E_OK;
+    }
+
+    int add_heap_to_regional_heap (void *rheap, void *heap)
+    {
+        ((ets_heap_t *)heap)->h_owning_heap = (ets_heap_t *)rheap;
+        __atomic_add_fetch (&((ets_heap_t *)rheap)->h_owned_heaps, 1, __ATOMIC_SEQ_CST);
+        return E_OK;
+    }
+
+    int dealloc_object (void *object)
+    {
+        if (!object)
+            return E_FAIL;
+        ets_block_t *block = ets_get_block_for_object (object);
+        return ets_block_dealloc_object (block, object);
+    }
+    int alloc_object (void **objectp, size_t osize)
+    {
+        return ::ets_heap_alloc_object (*_ETS_local_heap, objectp, osize);
+    }
 }
